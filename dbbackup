@@ -1,0 +1,707 @@
+#!/usr/bin/perl
+# Author: DuncanFyfe
+# Contact: duncanfyfe@domenlas.com
+# Copyright: GPL-2
+# Issued: 2014-06-16
+
+use strict;
+use version 0.77;
+use FindBin qw($RealBin);
+use File::Basename qw();
+use File::Spec qw();
+use File::Path qw();
+use Fcntl qw(:DEFAULT :flock);
+
+# We use a global hash to collect pid file names.  This is later 
+# combined with an END block to clean up the pid files in the event 
+# of an abnormal exit.
+
+use vars qw($Version %Lockfiles);
+$Version = version->declare(1.0.0);
+
+# Look in the following locations for the configuration file.
+# By default the same location will be searched for the pgpassfile.
+
+my @confdir = ( '/etc', File::Basename::dirname($RealBin), $ENV{HOME} );
+my $conffilebasename = 'dbbackup.conf';
+my $conffile;
+my $confdir;
+foreach my $r (@confdir) {
+    $conffile = File::Spec->catfile( $r, 'dbbackup.conf' );
+    if ( -f $conffile ) {
+        $confdir = $r;
+        last;
+    }
+    $conffile = undef;
+}
+
+###
+### Subroutines for handling lock files.
+### A PID file is used to stop slow backups running into each other.
+### It also allows this process and other processes to avoid contention
+### on the same database resources.
+###
+sub getpid {
+
+# Get the PID contained in the lock file (assuming we created it)
+# Returns:
+# 	The numerical pid from the first line of the pid file if there 
+#	is one. 
+#	0 if the pid file does not exist.
+#	undef  if the pid file could not be locked or the first line of
+#	the pid file contains non-numerical characters (ie. it is not a
+#	pid file). 
+#	ie. undef means you might try to create a lock file.  0 means
+#	don't. There is something unusual about the existing file of 
+#	the same anem and blindly clobbering it is probably not what 
+#	you want to do.
+
+    my ( $lockfile, $err ) = @_;
+    $err ||= {};
+    my $rtn = 0;
+    my $pidh;
+    if (   -f $lockfile
+        && sysopen( $pidh, $lockfile, O_RDONLY )
+        && flock( $pidh, LOCK_EX ) )
+    {
+
+        $rtn = <$pidh>;
+        close($pidh);
+        chomp($rtn);
+
+        unless ( $rtn =~ /^\d+$/ ) {
+            $rtn = undef;
+        }
+    }
+    else {
+        my $errmsg = $!;
+        if ($errmsg) {
+            $err->{errmsg} = $errmsg;
+            print $errmsg, "\n", 'Unable to open lock file: ', $lockfile, "\n";
+        }
+    }
+    return $rtn;
+}
+
+sub checklockfile {
+
+    # Check for an existing lock file and if it belongs to a running 
+    # process.
+    # Returns
+    #	1 if the pid file does not exist or exists and belongs to this
+    #   running process or exists and belongs to a non-existant process
+    #   (didn't answer a signal).
+    # 	0 otherwise.
+
+    my ( $lockfile, $err ) = (@_);
+    $err ||= {};
+
+    my $rtn = 1;
+    if ( $lockfile && -f $lockfile ) {
+        my $cpid = &getpid( $lockfile, $err );
+        $rtn = $cpid && ( $cpid == $$ || !kill( 0 => $cpid ) );
+    }
+    return $rtn;
+}
+
+sub createlockfile {
+
+    # If no lock file exists, or one exists but the PID in it belongs 
+    # to an unsignalable process then create a new file writing the PID
+    # of this process to it.
+    # If a timestamp is provided then that is written as a second line to the lock file.
+    # Returns true (1) if the resulting lock file is owned by this 
+    # process and false (0) otherwise. 
+
+    my ( $lockfile, $timestamp, $err ) = (@_);
+    $err ||= {};
+
+    my $rtn = &checklockfile( $lockfile, $err );
+    if (   $rtn
+        && sysopen( PID, $lockfile, O_WRONLY | O_CREAT | O_TRUNC )
+        && flock( PID, LOCK_EX ) )
+    {
+        print PID "$$\n";
+        if ($timestamp) {
+            print PID 'Timestamp ', $timestamp, "\n";
+        }
+        close PID;
+
+        $rtn = &checklockfile($lockfile);
+    }
+    else {
+        my $errmsg = $!;
+        if ($errmsg) {
+            $err->{errmsg} = $errmsg;
+            print $errmsg, "\n", 'Unable to open lock file: ', $lockfile, "\n";
+        }
+
+    }
+    return $rtn;
+}
+
+sub unlinklockfile {
+
+    # Unlink a pid file we own.
+    # Returns true (1) if the pid file does not exist or was cleaned
+    # up, false (0) otherwise.
+
+    my $rtn;
+    foreach my $lockfile (@_) {
+        my $chk = &checklockfile($lockfile);
+        if ($chk) {
+            $rtn += unlink($lockfile);
+        }
+    }
+    return $rtn;
+}
+
+sub loadconfiguration {
+
+    my $filename = shift;
+    my $rtn      = {};
+    my $fh;
+    if ( open( $fh, '<', $filename ) ) {
+
+        # Because hashes are stripped from the conf file we can safely use
+        # keys starting with a hash for internal purposes.
+        my $idkey = '#default';
+        while ( my $line = <$fh> ) {
+            $line =~ s/#.*//;
+            $line =~ s/^\s+|\s+$//g;
+            next unless ($line);
+
+            my @p = split /\s*=\s*/, $line, 2;
+            map { s/^\s+|\s+$//g } @p;
+            if ( @p == 1 ) {
+                $idkey = $p[0];
+                $rtn->{ $p[0] } = { '#id' => $p[0] };
+            }
+            elsif ( @p == 2 ) {
+                my $v = $p[1];
+                if ( exists( $rtn->{$idkey}{ $p[0] } ) ) {
+                    if ( ref( $rtn->{$idkey}{ $p[0] } ) ) {
+                        push @{ $rtn->{$idkey}{ $p[0] } }, $v;
+                    }
+                    else {
+                        my $vv = $rtn->{$idkey}{ $p[0] };
+                        $rtn->{$idkey}{ $p[0] } = [ $vv, $v ];
+                    }
+
+                }
+                else {
+                    $rtn->{$idkey}{ $p[0] } = $p[1];
+                }
+            }
+        }
+        close($fh);
+    }
+    else {
+        print "Unable to open configuration file: $filename\n";
+    }
+    return $rtn;
+}
+
+sub resolveconfiguration {
+
+# Resolve variables in the configuration file.
+# $foo or ${foo} are treated as variables and replaced with values or
+# the empty string if no value is found. The value is found by looking
+# for the key 'foo' in the current configuration section, then the 
+# #default section and finally $ENV{foo}.
+
+    my $rtn = shift;
+
+# Start with the #default section and sort the rest to provide some 
+# predictability to processing
+    my @id = ( '#default', sort( grep { $_ ne '#default' } keys(%$rtn) ) );
+    foreach my $id (@id) {
+        my $h = $rtn->{$id};
+
+        # Again, sort the keys for some predictability.
+        my @hid = sort( keys(%$h) );
+        foreach my $k (@hid) {
+            my $v = $h->{$k};
+            while ( $v =~ /\$(\{\w+\})|\$(\w+)/ ) {
+                my $ss = $1 || $2;
+                my $ak = $ss;
+                if ($1) {
+                    $ak =~ s/[{}]//g;
+                }
+                my $av = "";
+                if ( exists( $h->{$ak} ) ) {
+                    $av = $h->{$ak};
+                }
+                elsif ( exists( $rtn->{'#default'}{$ak} ) ) {
+                    $av = $rtn->{'#default'}{$ak};
+                }
+                else {
+                    $av = $ENV{$ak};
+                }
+                $v =~ s/\$$ss/$av/;
+            }
+            $h->{$k} = $v;
+
+        }
+    }
+    return $rtn;
+}
+
+sub run {
+
+    # Wrapper to run external commands with added error handling.
+    # Returns a list of the output from the command.
+    # err hash is used to store error messages.
+    my ( $cmd, $err ) = @_;
+    my $pipe;
+    open( $pipe, "$cmd 2>&1 |" )
+      or die( 'COMMAND', 'Error opening external command:', $cmd );
+    my @out = (<$pipe>);
+    close $pipe;
+    my $rv = $?;
+
+    if ($err) {
+        $cmd = &safecommand($cmd);
+        if ( $rv == -1 ) {
+            $err->{errmsg} =
+              sprintf( 'ExecSysFail: Opening external command failed: %s', $cmd );
+        }
+        elsif ( $rv & 127 ) {
+            $err->{errmsg} = sprintf(
+                'DeathbySignal: Received signal signal %d, %s coredump (command: %s).',
+                ( $rv & 127 ),
+                ( $rv & 128 ) ? 'with' : 'without', $cmd
+            );
+        }
+        elsif ( $? >> 8 ) {
+            $err->{errmsg} =
+              sprintf( 'ExecAbend: "Exited with value %d (command : %s)', $rv >> 8, $cmd );
+        }
+    }
+    return \@out;
+}
+
+sub iso8601 {
+
+# Turn a localtime list of numbers into an iso8601 formatted date 
+# modified to be usable as part of a filename.
+    my @t = @_;
+    unless (@t) {
+        @t = gmtime();
+    }
+
+# Seconds resolution timestamp in ISO-8601 format modified to make
+# it filename friendly (ccyy-mm-ddThh_mm_ss)
+#  0    1    2     3     4    5     6     7     8
+
+    my ( $sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst ) = @t;
+    return sprintf(
+        '%04d-%02d-%02dT%02d_%02d_%02d',
+        $year + 1900,
+        $mon + 1, $mday, $hour, $min, $sec
+    );
+}
+
+sub safecommand {
+
+    # Try to replace passwords with safe text when logging commands.
+    my $cmd = shift;
+    if ( $cmd =~ /password=(\S*)/i ) {
+        my $p = $1;
+        $p = $p ? 'password' : 'undef';
+        $cmd =~ s/password=(\S*)/password=$p/i;
+    }
+    return $cmd;
+}
+
+sub mysqlgetdblist {
+
+    # Use the mysql "SHOW DATABASES" command to get what we need.
+    # $h is a hash of DB command line necessaries (eg. password).
+    # $ex is an arrayref to a list of schema to exclude from the returned list.
+    # $ex defaults to [ 'information_schema' ]
+    my ( $h, $err ) = @_;
+    my @rtn;
+
+    my $cmd = sprintf( "echo SHOW DATABASES | mysql %s", $h->{idstring} );
+    my $out = &run( $cmd, $err );
+
+    # Get rid of Database header line.
+    shift @$out;
+
+    # Eliminate leading/trailing whites space and
+    # remove the mysql specific  information_schema
+    map { s/^\s+|\s+$//g; } @$out;
+    return grep { $_ && $_ ne 'information_schema' } @$out;
+}
+
+sub psqlgetdblist {
+
+# Get a list of postgresql databases to be backed up.
+# Needs a suitable postgresql username and the target database host.
+# This relies on the PGPASSFILE environment variable being set and 
+# pointing to a suitable pgpass file.
+    my ( $h, $err ) = @_;
+    my @rtn;
+    my $x = &run( 'printenv', {} );
+
+    my $cmd = sprintf(
+'echo "SELECT datname FROM pg_database WHERE datistemplate = false" | psql --pset="tuples_only" --no-password %s',
+        $h->{idstring} );
+    my $out = &run( $cmd, $err );
+
+    # Eliminate leading/trailing whites space and
+    map         { s/^\s+|\s+$//g; } @$out;
+    return grep { $_ } @$out;
+}
+
+sub sqlbackup {
+
+    # Backup a set of databases.
+
+    my $h         = shift;
+    my $dbid      = $h->{'#id'};
+    my $choice    = $h->{choice};
+    my $timestamp = $h->{timestamp};
+    my $lockdir   = $h->{lockdir};
+    my $dumpdir   = $h->{dumpdir};
+    my $logdir    = $h->{logdir};
+    $h->{logdir} ||= $h->{dumpdir};
+
+    my $outputtodir = undef;
+
+    my $dbidbasename = sprintf( "%s_%s_%s", $dbid, $choice, $timestamp );
+    my $dbidlogfile = File::Spec->catfile( $logdir, $dbidbasename . ".log" );
+    my $dbidlog;
+    open( $dbidlog, '>', $dbidlogfile )
+      or die( 'Unable to open logfile : ', $dbidlogfile, ' ', $! );
+    print $dbidlog "### START: BACKUP $dbidbasename\n";
+
+    my @dbname = ();
+    my $err    = {};
+    my $cmd;
+    my $idstring = "";
+
+    # Has the user provided a list of databases to backup ?
+    if ( $h->{dbname} ) {
+        @dbname = ref( $h->{dbname} ) ? @{ $h->{dbname} } : $h->{dbname};
+        @dbname = split /[#,\s]+/, join( '#', @dbname );
+    }
+
+    # If the user did not supply a list of databases, make our own.
+    if ( $dbid =~ /mysql/i ) {
+        unless (@dbname) { @dbname = &mysqlgetdblist( $h, $err ); }
+        $outputtodir = 0;
+
+        my $idstring =
+          $h->{port}
+          ? sprintf( "--user=%s --password=%s --host=%s --port=%d",
+            $h->{user}, $h->{password}, $h->{host}, $h->{port} )
+          : sprintf( "--user=%s --password=%s --host=%s",
+            $h->{user}, $h->{password}, $h->{host} );
+        $cmd = sprintf( "mysqldump --opt ", $idstring );
+    }
+    elsif ( $dbid =~ /psql|postgres/i ) {
+        $ENV{PGPASSFILE} =
+          $h->{pgpassfile} || File::Spec->catfile( $h->{confdir}, 'pgpass' );
+        unless (@dbname) { @dbname = &psqlgetdblist( $h, $err ); }
+        $outputtodir = 1;
+        my $idstring =
+          $h->{port}
+          ? sprintf( "--username=%s --host=%s --port=%d",
+            $h->{user}, $h->{host}, $h->{port} )
+          : sprintf( "--username=%s --host=%s", $h->{user}, $h->{host} );
+        $cmd =
+          sprintf( "pg_dump --verbose --clean --create --no-password --format=d %s ",
+            $idstring );
+    }
+    $h->{idstring} = $idstring;
+
+    if ( $err->{errmsg} ) {
+        print $dbidlog $err->{errmsg}, "\n";
+    }
+    else {
+        print $dbidlog 'dbname=', join( ',', @dbname ), "\n";
+        foreach my $dbname (@dbname) {
+            next unless $dbname;
+            chomp $dbname;
+            my $lockfile = File::Spec->catfile( $lockdir, "${dbid}_$dbname.pid" );
+            if ( &createlockfile($lockfile) ) {
+                $Lockfiles{$lockfile} = 1;
+
+                my $basename = sprintf( "%s_%s_%s_%s", $dbid, $dbname, $choice, $timestamp );
+                my $logfile = File::Spec->catfile( $logdir, $basename . ".log" );
+
+                # The backup is made to an 'inprogress' place and then moved to the final
+                # 'completed' destination if it works.
+                my $tmpfile = File::Spec->catfile( $dumpdir, $basename . ".inprogress" );
+                my $sqlfile = File::Spec->catfile( $dumpdir, $basename . ".completed" );
+                if ($outputtodir) {
+                    File::Path::make_path($tmpfile);
+                }
+                my $log;
+                open( $log, ">$logfile" )
+                  or die( 'Unable to open logfile : ', $logfile );
+
+                print $log "### START: BACKUP $basename\n";
+                print $log "### Temporary dump file $tmpfile\n";
+                print $log "### Final     dump file $sqlfile\n";
+                my $dumpcmd = $cmd . " $dbname";
+                if ( $dbid =~ /mysql/i ) {
+                    $dumpcmd = $cmd . sprintf( "--result-file=%s %s", $tmpfile, $dbname );
+                }
+                elsif ( $dbid =~ /psql|postgres/i ) {
+                    $dumpcmd = $cmd . sprintf( "--file=%s %s", $tmpfile, $dbname );
+                }
+                my $logcmd = &safecommand($dumpcmd);
+                print $log $logcmd, "\n";
+
+                my $out = &run( $dumpcmd, $err );
+                print $log @$out;
+                if ( $err->{errmsg} ) {
+                    print $log $err->{errmsg}, "\n";
+                    print $log "ERROR: Dump command failed.\n";
+                }
+                else {
+                    # Success! Rename .inprogress to .completed
+                    rename( $tmpfile, $sqlfile );
+                }
+                print $log "### END: BACKUP $basename\n";
+                close($log);
+                if ( &unlinklockfile($lockfile) ) { delete $Lockfiles{$lockfile}; }
+            }
+        }
+    }
+    print $dbidlog "### END: BACKUP $dbidbasename\n";
+    close($dbidlog);
+}
+
+sub processdbid {
+
+    # Process a uniquely identified database cluster/host.
+    my ( $dbid, $conf ) = @_;
+
+    # Resolve defaults and specifics into a single hash.
+    $conf->{dbidlockfile} ||= File::Spec->catfile( $conf->{lockdir}, "$dbid.pid" );
+    my $dbidlockfile = $conf->{dbidlockfile};
+    if ( &createlockfile($dbidlockfile) ) {
+        $Lockfiles{$dbidlockfile} = 1;
+        if ( $conf->{db} =~ /mysql/i ) {
+            &sqlbackup($conf);
+        }
+        elsif ( $conf->{db} =~ /psql|postgres/i ) {
+            &sqlbackup($conf);
+        }
+        if ( &unlinklockfile($dbidlockfile) ) { delete $Lockfiles{$dbidlockfile}; }
+    }
+    else {
+        print "Hello, World!\n";
+
+    }
+
+}
+
+# Use an END block to clean up after ourselves in the event of an unexpected exit.
+END {
+    if ( keys(%Lockfiles) ) {
+        print "Cleanup in END block!\n";
+        &unlinklockfile( keys(%Lockfiles) );
+    }
+}
+
+# Name if this process used for the lock file.
+my $name = File::Basename::basename($0);
+
+my $conf = &loadconfiguration($conffile);
+$conf->{'#default'} ||= {};
+$conf->{'#default'}{choice} =
+  $ARGV[0] || $conf->{'#default'}{choice} || 'daily';
+$conf->{'#default'}{confdir} ||= $confdir;
+
+&resolveconfiguration($conf);
+
+# Extract the default configuration.
+my $default = delete( $conf->{'#default'} ) || {};
+
+# Now we can work out where the lock file should go, try to obtain it.
+my $lockdir = $default->{lockdir};
+
+$default->{lockfile} ||= File::Spec->catfile( $lockdir, "$name.pid" );
+my $lockfile = $default->{lockfile};
+
+unless ( &createlockfile( $default->{lockfile} ) ) {
+    die("Unable to take pid file $default->{lockfile}. No backups were attempted.");
+}
+$Lockfiles{ $default->{lockfile} } = 1;
+
+# Disconnect from the terminal
+# Redirect STDERR to STDOUT.
+open( STDIN, '</dev/null' )
+  or die('Unable to redirect STDIN to /dev/null.');
+open( STDERR, '>&STDOUT' )
+  or die('Unable to redirect STDERR to STDOUT.');
+select STDOUT;
+
+# Timestamps written to log output.
+my @gmtime = gmtime();
+$default->{gmtime}    = \@gmtime;
+$default->{timestamp} = &iso8601(@gmtime);
+
+while ( my ( $dbid, $dbconf ) = each(%$conf) ) {
+
+    # Skip internal keys.
+    next if ( $dbid =~ /^#/ || $dbconf->{ignore} =~ /^[tT]/ );
+    my $rconf = { %$default, %$dbconf };
+    &processdbid( $dbid, $rconf );
+}
+if ( &unlinklockfile($lockfile) ) { delete $Lockfiles{$lockfile}; }
+
+__END__
+
+=encoding UTF-8
+=pod
+=head1 NAME
+
+dbbackup - a simple script to make backups of databases.
+	
+=head1 SYNOPSIS (Version 1.0)
+
+	dbbackup [choice]
+
+=head1 DESCRIPTION
+
+B<dbbackup> is a simple script to backup databases. It relies on database tools such as B<pg_dump> and B<mysql> to do the backups.  This version (1.0) works with postgresql and mysql databases.
+
+Dumps are made to an intermediate location I<X.inprogress> and moved to the final location I<X.completed> on successfull completion.  Mysql dumps are to file; postgres dumps use the more flexible directory format.
+
+A configuration file dbbackup.conf is required.  It is searched for in /etc, the script directory and the users home directory. This can be redefined at the top of the script as necessary. The format of this file is given below.  Each section of the configuration refers to a single database type and host. 
+
+The script creates a hierarchy of lock files as it dumps each database.  One lockfile is for the script itself, one for each database configuration and one for each database dump.  This allows other programs to identify what backups are in progress and avoid conflicts.
+
+The script was deliberately written using Perl modules available from a standard Perl install.  This was to make it more portable between hosting services.
+
+=head2 The F<dbbackup.conf> configuration file
+
+=head3 File Format
+
+=over 4
+
+=item I<#> to the end of line 
+
+Are comments.  These are stripped and never processed.
+
+=item Blank lines
+
+Are ignored.
+
+=item C<${foo}> or C<$foo\W> 
+
+Variables.  The value if taken from the key C<foo> in the current section, the default section or environment variable of the same name in that order. If no
+value is found the empty string is substituted.
+
+=item key1=value1   
+
+key1 with value1 in the current section.  By default values are scalars.
+
+=item key1=value2 
+
+A key repeated in a section turns the values into a list.
+
+=item identifier
+
+An identifier (no equals sign) starts a new section.  key=value pairs before the first section header go into the #default section.
+
+=item C<$confdir> 
+
+The key confdir is set to the directory this configuration file is found in.  It can therefore be used as a variable in the configuration file.
+
+=back 
+
+=head3 Recognized Key Values
+
+=over 4
+
+=item choice=string
+
+=item root=$HOME/tmp/backup
+
+Common root for the backup tree - where logs, output etc should go.
+
+=item lockdir=$root/lock
+
+Directory lock files will be created.
+
+=item logdir=$root/log
+
+Directory logfiles will be created.
+
+=item dumpdir=$root/dump
+
+Directory database dumps will be created.
+
+=item db=mysql|psql
+
+Identify the type of database a section refers to.
+
+=item ignore=true|false
+
+=item host=mysql.example.com
+
+The database host to talk to.
+
+=item port=port number
+
+The port to talk to on the specified host.  The default
+port is assumed if non is given.
+
+=item user=superduperuser
+
+A database user (role) with necessary backup privileges.
+
+=item password=supersecretpassword B<[db=mysql only]>
+
+The users password.
+
+=item dbname=database1
+
+Specific databases to be backed up.  If non are given the
+database is queried for a list and all are backed up.
+
+Specify multiple times to specify a list of database names.
+
+=item pgpassfile=$confdir/pgpass  B<[db=psql only]>
+
+A suitable postgres pgpass file.
+
+=back
+
+=head3 Notes
+
+B<Yes> you could make this recurse and break things, but then you get to keep all of the pieces.
+
+Variable substitution is performed on the I<#default>. section first and then the other sections in alphabetical order.
+
+B<No> you cannot create identifiers starting with a #.  They would be stripped out as comments.  That is why such keys are used for internal purposes.
+
+
+=head2 Mysql Specifics
+
+Mysql needs a username and password which must be given in the dbbackup.conf file.
+Please make sure the dbbackup.conf file has minimal permissions.
+
+
+=head2 Postgres Specifics
+
+Postgres does not accept passwords on the command line.  These must be
+provided in a separate, correctly permissioned I<pgpass> file.  By
+default this file is looked for in the same directory as the dbbackup.conf
+file.
+
+=head1 SECURITY
+
+Mysql needs a username and password to be given in the dbbackup.conf file. Please make sure the dbbackup.conf file has minimal permissions.
+
+B<dbdump> creates files with predictable names.  If it is run with elevated privileges then this is a security hole.  You must protect
+against this by limiting the privileges of the directories where output (lock files, logs and backups) are created.
+
+=cut
