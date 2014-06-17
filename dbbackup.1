@@ -133,28 +133,40 @@
 .\" ========================================================================
 .\"
 .IX Title "DBBACKUP 1"
-.TH DBBACKUP 1 "2014-06-16" "perl v5.18.2" "User Contributed Perl Documentation"
+.TH DBBACKUP 1 "2014-06-17" "perl v5.18.2" "User Contributed Perl Documentation"
 .\" For nroff, turn off justification.  Always turn off hyphenation; it makes
 .\" way too many mistakes in technical documents.
 .if n .ad l
 .nh
-dbbackup \- a simple script to make backups of databases.
+dbbackup \- A simple Perl script for backing up databases.
 .SH "SYNOPSIS (Version 1.0)"
 .IX Header "SYNOPSIS (Version 1.0)"
 .Vb 1
-\&        dbbackup [choice]
+\&        dbbackup [choice [section] [section] ...].
 .Ve
 .SH "DESCRIPTION"
 .IX Header "DESCRIPTION"
 \&\fBdbbackup\fR is a simple script to backup databases. It relies on database tools such as \fBpg_dump\fR and \fBmysql\fR to do the backups.  This version (1.0) works with postgresql and mysql databases.
 .PP
-Dumps are made to an intermediate location \fIX.inprogress\fR and moved to the final location \fIX.completed\fR on successfull completion.  Mysql dumps are to file; postgres dumps use the more flexible directory format.
+The argument \fIchoice\fR is used to distinguish different types of backups (eg. daily, weekly etc).  The default value is \fIdaily\fR.
 .PP
-A configuration file dbbackup.conf is required.  It is searched for in /etc, the script directory and the users home directory. This can be redefined at the top of the script as necessary. The format of this file is given below.  Each section of the configuration refers to a single database type and host.
+A configuration file dbbackup.conf is required.  It is searched for in /etc, the script directory and the users home directory. This can be redefined at the top of the script as necessary. The format of this file is given below.  Each configuration file section refers to a single database type and host.
+.PP
+By default all configuration file sections are processed (unless the ignore option is given).  Specific sections can be selected on the command line after the choice argument.
+.PP
+Dumps are made to an intermediate location before being moved to the final location on successfull completion.  Mysql dumps are to file; postgres dumps use the more flexible directory format.
+.ie n .IP "Intermediate location: $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.inprogress" 4
+.el .IP "Intermediate location: \f(CW$backupdir\fR/${sectionid}_${databasename}_${choice}_${timestamp}.inprogress" 4
+.IX Item "Intermediate location: $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.inprogress"
+.PD 0
+.ie n .IP "Final location:        $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.completed" 4
+.el .IP "Final location:        \f(CW$backupdir\fR/${sectionid}_${databasename}_${choice}_${timestamp}.completed" 4
+.IX Item "Final location: $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.completed"
+.PD
 .PP
 The script creates a hierarchy of lock files as it dumps each database.  One lockfile is for the script itself, one for each database configuration and one for each database dump.  This allows other programs to identify what backups are in progress and avoid conflicts.
 .PP
-The script was deliberately written using Perl modules available from a standard Perl install.  This was to make it more portable between hosting services.
+The script was deliberately written using the limited set of Perl modules available from a standard Perl install.  This makes it more portable across hosting services.
 .SS "The \fIdbbackup.conf\fP configuration file"
 .IX Subsection "The dbbackup.conf configuration file"
 \fIFile Format\fR
@@ -168,7 +180,7 @@ Are ignored.
 .ie n .IP """${foo}"" or ""$foo\eW""" 4
 .el .IP "\f(CW${foo}\fR or \f(CW$foo\eW\fR" 4
 .IX Item "${foo} or $fooW"
-Variables.  The value if taken from the key \f(CW\*(C`foo\*(C'\fR in the current section, the default section or environment variable of the same name in that order. If no
+Variables.  The key=value values are processed for variable subtitution.  The replacement value is looked for using the key \f(CW\*(C`foo\*(C'\fR in the current section, the default section or environment variable of the same name in that order. If no
 value is found the empty string is substituted.
 .IP "key1=value1" 4
 .IX Item "key1=value1"
@@ -205,12 +217,12 @@ Directory database dumps will be created.
 .IP "db=mysql|psql" 4
 .IX Item "db=mysql|psql"
 Identify the type of database a section refers to.
-.IP "ignore=true|false" 4
-.IX Item "ignore=true|false"
-.PD 0
+.IP "ignore=y|yes|t|true|1" 4
+.IX Item "ignore=y|yes|t|true|1"
+Tell dbbackup to ignore this section.  Anything other than y, yes, t, true or 1
+is treated as false.  The default is false.
 .IP "host=mysql.example.com" 4
 .IX Item "host=mysql.example.com"
-.PD
 The database host to talk to.
 .IP "port=port number" 4
 .IX Item "port=port number"
@@ -235,11 +247,11 @@ A suitable postgres pgpass file.
 \fINotes\fR
 .IX Subsection "Notes"
 .PP
-\&\fBYes\fR you could make this recurse and break things, but then you get to keep all of the pieces.
+\&\fBYes\fR you can make variable substitution recurse and break things; but then you get to keep all of the pieces.
 .PP
-Variable substitution is performed on the \fI#default\fR. section first and then the other sections in alphabetical order.
+Variable substitution is performed on the \fI#default\fR section first and then on the remaining sections in alphabetical order.
 .PP
-\&\fBNo\fR you cannot create identifiers starting with a #.  They would be stripped out as comments.  That is why such keys are used for internal purposes.
+\&\fBNo\fR you cannot create section names with a #.  # to the end of line are stripped out as comments when the configuration file is read.  That makes such keys perfect for internal purposes.
 .SS "Mysql Specifics"
 .IX Subsection "Mysql Specifics"
 Mysql needs a username and password which must be given in the dbbackup.conf file.

@@ -17,7 +17,7 @@ use Fcntl qw(:DEFAULT :flock);
 # of an abnormal exit.
 
 use vars qw($Version %Lockfiles);
-$Version = version->declare(1.0.0);
+$Version = version->declare(1.0.1);
 
 # Look in the following locations for the configuration file.
 # By default the same location will be searched for the pgpassfile.
@@ -501,6 +501,10 @@ sub processdbid {
 
 }
 
+sub shouldignore {
+	my $s = shift;
+	return $s && $s =~ /y|yes|t|True|1/i ;
+}
 # Use an END block to clean up after ourselves in the event of an unexpected exit.
 END {
     if ( keys(%Lockfiles) ) {
@@ -516,6 +520,8 @@ my $conf = &loadconfiguration($conffile);
 $conf->{'#default'} ||= {};
 $conf->{'#default'}{choice} =
   $ARGV[0] || $conf->{'#default'}{choice} || 'daily';
+
+$conf->{'#default'}{sections} = $#ARGV > 1 ? [@ARGV[1 .. $#ARGV]] : [];
 $conf->{'#default'}{confdir} ||= $confdir;
 
 &resolveconfiguration($conf);
@@ -547,11 +553,15 @@ my @gmtime = gmtime();
 $default->{gmtime}    = \@gmtime;
 $default->{timestamp} = &iso8601(@gmtime);
 
-while ( my ( $dbid, $dbconf ) = each(%$conf) ) {
+unless (keys %{$default->{sections}}) {
+	$default->{sections} = [sort (keys(%$conf)) ];
+}
+print STDERR "sections = ",join(',',@{$default->{sections}}),"\n";
 
-    # Skip internal keys.
-    next if ( $dbid =~ /^#/ || $dbconf->{ignore} =~ /^[tT]/ );
+foreach my $dbid (@{$default->{sections}}) {
+    my $dbconf = $conf->{$dbid};
     my $rconf = { %$default, %$dbconf };
+    next if ( &shouldignore($dbconf->{ignore}) );
     &processdbid( $dbid, $rconf );
 }
 if ( &unlinklockfile($lockfile) ) { delete $Lockfiles{$lockfile}; }
@@ -562,23 +572,35 @@ __END__
 =pod
 =head1 NAME
 
-dbbackup - a simple script to make backups of databases.
+dbbackup - A simple Perl script for backing up databases.
 	
 =head1 SYNOPSIS (Version 1.0)
 
-	dbbackup [choice]
+	dbbackup [choice [section] [section] ...].
 
 =head1 DESCRIPTION
 
 B<dbbackup> is a simple script to backup databases. It relies on database tools such as B<pg_dump> and B<mysql> to do the backups.  This version (1.0) works with postgresql and mysql databases.
 
-Dumps are made to an intermediate location I<X.inprogress> and moved to the final location I<X.completed> on successfull completion.  Mysql dumps are to file; postgres dumps use the more flexible directory format.
+The argument I<choice> is used to distinguish different types of backups (eg. daily, weekly etc).  The default value is I<daily>.  
 
-A configuration file dbbackup.conf is required.  It is searched for in /etc, the script directory and the users home directory. This can be redefined at the top of the script as necessary. The format of this file is given below.  Each section of the configuration refers to a single database type and host. 
+A configuration file dbbackup.conf is required.  It is searched for in /etc, the script directory and the users home directory. This can be redefined at the top of the script as necessary. The format of this file is given below.  Each configuration file section refers to a single database type and host. 
+
+By default all configuration file sections are processed (unless the ignore option is given).  Specific sections can be selected on the command line after the choice argument.
+
+Dumps are made to an intermediate location before being moved to the final location on successfull completion.  Mysql dumps are to file; postgres dumps use the more flexible directory format.
+
+=over 4
+
+=item Intermediate location: $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.inprogress
+
+=item Final location:        $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.completed 
+
+=back
 
 The script creates a hierarchy of lock files as it dumps each database.  One lockfile is for the script itself, one for each database configuration and one for each database dump.  This allows other programs to identify what backups are in progress and avoid conflicts.
 
-The script was deliberately written using Perl modules available from a standard Perl install.  This was to make it more portable between hosting services.
+The script was deliberately written using the limited set of Perl modules available from a standard Perl install.  This makes it more portable across hosting services.
 
 =head2 The F<dbbackup.conf> configuration file
 
@@ -596,7 +618,7 @@ Are ignored.
 
 =item C<${foo}> or C<$foo\W> 
 
-Variables.  The value if taken from the key C<foo> in the current section, the default section or environment variable of the same name in that order. If no
+Variables.  The key=value values are processed for variable subtitution.  The replacement value is looked for using the key C<foo> in the current section, the default section or environment variable of the same name in that order. If no
 value is found the empty string is substituted.
 
 =item key1=value1   
@@ -643,7 +665,10 @@ Directory database dumps will be created.
 
 Identify the type of database a section refers to.
 
-=item ignore=true|false
+=item ignore=y|yes|t|true|1
+
+Tell dbbackup to ignore this section.  Anything other than y, yes, t, true or 1
+is treated as false.  The default is false.
 
 =item host=mysql.example.com
 
@@ -677,11 +702,11 @@ A suitable postgres pgpass file.
 
 =head3 Notes
 
-B<Yes> you could make this recurse and break things, but then you get to keep all of the pieces.
+B<Yes> you can make variable substitution recurse and break things; but then you get to keep all of the pieces.
 
-Variable substitution is performed on the I<#default>. section first and then the other sections in alphabetical order.
+Variable substitution is performed on the I<#default> section first and then on the remaining sections in alphabetical order.
 
-B<No> you cannot create identifiers starting with a #.  They would be stripped out as comments.  That is why such keys are used for internal purposes.
+B<No> you cannot create section names with a #.  # to the end of line are stripped out as comments when the configuration file is read.  That makes such keys perfect for internal purposes.
 
 
 =head2 Mysql Specifics
