@@ -136,5 +136,5 @@ file.
 
 Mysql needs a username and password to be given in the dbbackup.conf file. Please make sure the dbbackup.conf file has minimal permissions.
 
-**dbdump** creates files with predictable names.  If it is run with elevated privileges then this is a security hole.  You must protect
+**dbbackup** creates files with predictable names.  If it is run with elevated privileges then this is a security hole.  You must protect
 against this by limiting the privileges of the directories where output (lock files, logs and backups) are created.
