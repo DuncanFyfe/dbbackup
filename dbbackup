@@ -22,7 +22,7 @@ $Version = version->declare(1.0.1);
 # Look in the following locations for the configuration file.
 # By default the same location will be searched for the pgpassfile.
 
-my @confdir = ( '/etc', File::Basename::dirname($RealBin), $ENV{HOME} );
+my @confdir = ( '/etc', $RealBin, $ENV{HOME} );
 my $conffilebasename = 'dbbackup.conf';
 my $conffile;
 my $confdir;
@@ -390,32 +390,32 @@ sub sqlbackup {
 
     # If the user did not supply a list of databases, make our own.
     if ( $dbid =~ /mysql/i ) {
-        unless (@dbname) { @dbname = &mysqlgetdblist( $h, $err ); }
         $outputtodir = 0;
-
         my $idstring =
           $h->{port}
           ? sprintf( "--user=%s --password=%s --host=%s --port=%d",
             $h->{user}, $h->{password}, $h->{host}, $h->{port} )
           : sprintf( "--user=%s --password=%s --host=%s",
             $h->{user}, $h->{password}, $h->{host} );
+	$h->{idstring} = $idstring;
         $cmd = sprintf( "mysqldump --opt ", $idstring );
+        unless (@dbname) { @dbname = &mysqlgetdblist( $h, $err ); }
     }
     elsif ( $dbid =~ /psql|postgres/i ) {
-        $ENV{PGPASSFILE} =
-          $h->{pgpassfile} || File::Spec->catfile( $h->{confdir}, 'pgpass' );
-        unless (@dbname) { @dbname = &psqlgetdblist( $h, $err ); }
         $outputtodir = 1;
         my $idstring =
           $h->{port}
           ? sprintf( "--username=%s --host=%s --port=%d",
             $h->{user}, $h->{host}, $h->{port} )
           : sprintf( "--username=%s --host=%s", $h->{user}, $h->{host} );
+	$h->{idstring} = $idstring;
         $cmd =
           sprintf( "pg_dump --verbose --clean --create --no-password --format=d %s ",
             $idstring );
+        unless (@dbname) { @dbname = &psqlgetdblist( $h, $err ); }
+        $ENV{PGPASSFILE} =
+          $h->{pgpassfile} || File::Spec->catfile( $h->{confdir}, 'pgpass' );
     }
-    $h->{idstring} = $idstring;
 
     if ( $err->{errmsg} ) {
         print $dbidlog $err->{errmsg}, "\n";
@@ -553,7 +553,7 @@ my @gmtime = gmtime();
 $default->{gmtime}    = \@gmtime;
 $default->{timestamp} = &iso8601(@gmtime);
 
-unless (keys %{$default->{sections}}) {
+unless (@{$default->{sections}}) {
 	$default->{sections} = [sort (keys(%$conf)) ];
 }
 print STDERR "sections = ",join(',',@{$default->{sections}}),"\n";
