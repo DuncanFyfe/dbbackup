@@ -12,8 +12,8 @@ use File::Spec qw();
 use File::Path qw();
 use Fcntl qw(:DEFAULT :flock);
 
-# We use a global hash to collect pid file names.  This is later 
-# combined with an END block to clean up the pid files in the event 
+# We use a global hash to collect pid file names.  This is later
+# combined with an END block to clean up the pid files in the event
 # of an abnormal exit.
 
 use vars qw($Version %Lockfiles);
@@ -45,15 +45,15 @@ sub getpid {
 
 # Get the PID contained in the lock file (assuming we created it)
 # Returns:
-# 	The numerical pid from the first line of the pid file if there 
-#	is one. 
+# 	The numerical pid from the first line of the pid file if there
+#	is one.
 #	0 if the pid file does not exist.
 #	undef  if the pid file could not be locked or the first line of
 #	the pid file contains non-numerical characters (ie. it is not a
-#	pid file). 
+#	pid file).
 #	ie. undef means you might try to create a lock file.  0 means
-#	don't. There is something unusual about the existing file of 
-#	the same anem and blindly clobbering it is probably not what 
+#	don't. There is something unusual about the existing file of
+#	the same anem and blindly clobbering it is probably not what
 #	you want to do.
 
     my ( $lockfile, $err ) = @_;
@@ -85,7 +85,7 @@ sub getpid {
 
 sub checklockfile {
 
-    # Check for an existing lock file and if it belongs to a running 
+    # Check for an existing lock file and if it belongs to a running
     # process.
     # Returns
     #	1 if the pid file does not exist or exists and belongs to this
@@ -106,12 +106,12 @@ sub checklockfile {
 
 sub createlockfile {
 
-    # If no lock file exists, or one exists but the PID in it belongs 
+    # If no lock file exists, or one exists but the PID in it belongs
     # to an unsignalable process then create a new file writing the PID
     # of this process to it.
     # If a timestamp is provided then that is written as a second line to the lock file.
-    # Returns true (1) if the resulting lock file is owned by this 
-    # process and false (0) otherwise. 
+    # Returns true (1) if the resulting lock file is owned by this
+    # process and false (0) otherwise.
 
     my ( $lockfile, $timestamp, $err ) = (@_);
     $err ||= {};
@@ -207,12 +207,12 @@ sub resolveconfiguration {
 # Resolve variables in the configuration file.
 # $foo or ${foo} are treated as variables and replaced with values or
 # the empty string if no value is found. The value is found by looking
-# for the key 'foo' in the current configuration section, then the 
+# for the key 'foo' in the current configuration section, then the
 # #default section and finally $ENV{foo}.
 
     my $rtn = shift;
 
-# Start with the #default section and sort the rest to provide some 
+# Start with the #default section and sort the rest to provide some
 # predictability to processing
     my @id = ( '#default', sort( grep { $_ ne '#default' } keys(%$rtn) ) );
     foreach my $id (@id) {
@@ -283,7 +283,7 @@ sub run {
 
 sub iso8601 {
 
-# Turn a localtime list of numbers into an iso8601 formatted date 
+# Turn a localtime list of numbers into an iso8601 formatted date
 # modified to be usable as part of a filename.
     my @t = @_;
     unless (@t) {
@@ -339,7 +339,7 @@ sub psqlgetdblist {
 
 # Get a list of postgresql databases to be backed up.
 # Needs a suitable postgresql username and the target database host.
-# This relies on the PGPASSFILE environment variable being set and 
+# This relies on the PGPASSFILE environment variable being set and
 # pointing to a suitable pgpass file.
     my ( $h, $err ) = @_;
     my @rtn;
@@ -388,6 +388,7 @@ sub sqlbackup {
         @dbname = split /[#,\s]+/, join( '#', @dbname );
     }
 
+    # Construct user identity strings.
     # If the user did not supply a list of databases, make our own.
     if ( $dbid =~ /mysql/i ) {
         $outputtodir = 0;
@@ -398,7 +399,7 @@ sub sqlbackup {
           : sprintf( "--user=%s --password=%s --host=%s",
             $h->{user}, $h->{password}, $h->{host} );
 	$h->{idstring} = $idstring;
-        $cmd = sprintf( "mysqldump --opt ", $idstring );
+        $cmd = sprintf( "mysqldump --opt %s ", $idstring );
         unless (@dbname) { @dbname = &mysqlgetdblist( $h, $err ); }
     }
     elsif ( $dbid =~ /psql|postgres/i ) {
@@ -573,7 +574,7 @@ __END__
 =head1 NAME
 
 dbbackup - A simple Perl script for backing up databases.
-	
+
 =head1 SYNOPSIS (Version 1.0)
 
 	dbbackup [choice [section] [section] ...].
@@ -582,9 +583,9 @@ dbbackup - A simple Perl script for backing up databases.
 
 B<dbbackup> is a simple script to backup databases. It relies on database tools such as B<pg_dump> and B<mysql> to do the backups.  This version (1.0) works with postgresql and mysql databases.
 
-The argument I<choice> is used to distinguish different types of backups (eg. daily, weekly etc).  The default value is I<daily>.  
+The argument I<choice> is used to distinguish different types of backups (eg. daily, weekly etc).  The default value is I<daily>.
 
-A configuration file dbbackup.conf is required.  It is searched for in /etc, the script directory and the users home directory. This can be redefined at the top of the script as necessary. The format of this file is given below.  Each configuration file section refers to a single database type and host. 
+A configuration file dbbackup.conf is required.  It is searched for in /etc, the script directory and the users home directory. This can be redefined at the top of the script as necessary. The format of this file is given below.  Each configuration file section refers to a single database type and host.
 
 By default all configuration file sections are processed (unless the ignore option is given).  Specific sections can be selected on the command line after the choice argument.
 
@@ -594,7 +595,7 @@ Dumps are made to an intermediate location before being moved to the final locat
 
 =item Intermediate location: $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.inprogress
 
-=item Final location:        $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.completed 
+=item Final location:        $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.completed
 
 =back
 
@@ -608,7 +609,7 @@ The script was deliberately written using the limited set of Perl modules availa
 
 =over 4
 
-=item I<#> to the end of line 
+=item I<#> to the end of line
 
 Are comments.  These are stripped and never processed.
 
@@ -616,16 +617,16 @@ Are comments.  These are stripped and never processed.
 
 Are ignored.
 
-=item C<${foo}> or C<$foo\W> 
+=item C<${foo}> or C<$foo\W>
 
 Variables.  The key=value values are processed for variable subtitution.  The replacement value is looked for using the key C<foo> in the current section, the default section or environment variable of the same name in that order. If no
 value is found the empty string is substituted.
 
-=item key1=value1   
+=item key1=value1
 
 key1 with value1 in the current section.  By default values are scalars.
 
-=item key1=value2 
+=item key1=value2
 
 A key repeated in a section turns the values into a list.
 
@@ -633,11 +634,11 @@ A key repeated in a section turns the values into a list.
 
 An identifier (no equals sign) starts a new section.  key=value pairs before the first section header go into the #default section.
 
-=item C<$confdir> 
+=item C<$confdir>
 
 The key confdir is set to the directory this configuration file is found in.  It can therefore be used as a variable in the configuration file.
 
-=back 
+=back
 
 =head3 Recognized Key Values
 
